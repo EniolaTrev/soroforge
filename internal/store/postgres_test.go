@@ -84,7 +84,9 @@ func TestPostgresMigrationsAreReversible(t *testing.T) {
 	version, dirty, err := migrator.Version()
 	require.NoError(t, err)
 	require.False(t, dirty, "migrations must not leave the database dirty")
-	require.Equal(t, uint(1), version)
+	// Bump this alongside every new migration: it is what catches a migration
+	// file that is present but never applied.
+	require.Equal(t, uint(2), version)
 
 	require.NoError(t, migrator.Down())
 	require.NoError(t, migrator.Up())

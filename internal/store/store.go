@@ -79,6 +79,11 @@ type Deployment struct {
 	// Notes is free-form operator context, e.g. a ticket or release tag.
 	Notes string `json:"notes,omitempty"`
 
+	// ConstructorArgs records the typed constructor arguments a deploy used,
+	// as JSON in the same shape as soroforge.yaml. Empty for upgrades, which
+	// take none, and for deploys with no arguments.
+	ConstructorArgs string `json:"constructor_args,omitempty"`
+
 	CreatedAt time.Time `json:"created_at"`
 }
 

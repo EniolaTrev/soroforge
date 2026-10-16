@@ -57,6 +57,13 @@ type Service struct {
 	// reach a terminal state.
 	confirmTimeout time.Duration
 
+	// verifyAttempts and verifyDelay bound the post-upgrade re-read of the
+	// contract's WASM hash. The change can take one ledger close to become
+	// visible to the RPC node answering the read, so the first read may
+	// legitimately report the old hash.
+	verifyAttempts int
+	verifyDelay    time.Duration
+
 	// catalog publishes confirmed contracts to a network's sorovault_url.
 	catalog catalog.Registrar
 }
@@ -83,6 +90,15 @@ type Options struct {
 	// ConfirmTimeout defaults to DefaultConfirmTimeout.
 	ConfirmTimeout time.Duration
 
+	// VerifyAttempts bounds how many times Upgrade re-reads the contract's
+	// on-chain WASM hash after its upgrade transaction confirms. Defaults to
+	// DefaultVerifyAttempts; tests set it low.
+	VerifyAttempts int
+
+	// VerifyDelay is the wait between those re-reads. Defaults to
+	// DefaultVerifyDelay; tests set it low.
+	VerifyDelay time.Duration
+
 	// Catalog registers confirmed deploys and upgrades with the network's
 	// sorovault_url, when one is configured. Defaults to a SoroVault HTTP
 	// client; tests replace it.
@@ -96,6 +112,18 @@ type Options struct {
 // This also serves as the backstop for the SDK's PollTransaction, which
 // otherwise polls until its context ends.
 const DefaultConfirmTimeout = 2 * time.Minute
+
+// DefaultVerifyAttempts and DefaultVerifyDelay bound the post-upgrade check
+// that the new bytecode is actually live.
+//
+// A confirmed transaction is included in a ledger, but the RPC node answering
+// the follow-up read may still be serving an entry from before that close.
+// Four reads spread over roughly six seconds covers one ledger close without
+// hanging a CI job on a contract that never upgrades.
+const (
+	DefaultVerifyAttempts = 4
+	DefaultVerifyDelay    = 2 * time.Second
+)
 
 // New builds a Service.
 func New(opts Options) (*Service, error) {
@@ -122,6 +150,14 @@ func New(opts Options) (*Service, error) {
 	if confirmTimeout <= 0 {
 		confirmTimeout = DefaultConfirmTimeout
 	}
+	verifyAttempts := opts.VerifyAttempts
+	if verifyAttempts <= 0 {
+		verifyAttempts = DefaultVerifyAttempts
+	}
+	verifyDelay := opts.VerifyDelay
+	if verifyDelay <= 0 {
+		verifyDelay = DefaultVerifyDelay
+	}
 	registrar := opts.Catalog
 	if registrar == nil {
 		registrar = catalog.NewSoroVault(nil)
@@ -135,6 +171,8 @@ func New(opts Options) (*Service, error) {
 		log:            log,
 		baseFee:        baseFee,
 		confirmTimeout: confirmTimeout,
+		verifyAttempts: verifyAttempts,
+		verifyDelay:    verifyDelay,
 		catalog:        registrar,
 	}, nil
 }
@@ -192,6 +230,9 @@ func (s *Service) resolve(networkName, alias string) (resolved, error) {
 	if err != nil {
 		return resolved{}, err
 	}
+	// Resolve per-network overrides here, once, so deploy, dry run, and every
+	// other operation see the same effective contract.
+	contract = contract.ForNetwork(name)
 	client, err := s.clients(name, network)
 	if err != nil {
 		return resolved{}, fmt.Errorf("connect to %s: %w", name, err)

@@ -132,11 +132,11 @@ func (p *Postgres) ListContracts(ctx context.Context, network string) ([]Contrac
 
 const recordDeploymentSQL = `
 INSERT INTO deployments (
-    alias, network, contract_id, wasm_hash, action, deployer_pubkey, tx_hash, ledger, notes
+    alias, network, contract_id, wasm_hash, action, deployer_pubkey, tx_hash, ledger, notes, constructor_args
 )
-VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9)
+VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10)
 RETURNING id, alias, network, contract_id, wasm_hash, action,
-          deployer_pubkey, tx_hash, ledger, notes, created_at`
+          deployer_pubkey, tx_hash, ledger, notes, constructor_args, created_at`
 
 // RecordDeployment implements Store.
 func (p *Postgres) RecordDeployment(ctx context.Context, d Deployment) (Deployment, error) {
@@ -160,10 +160,14 @@ func (p *Postgres) RecordDeployment(ctx context.Context, d Deployment) (Deployme
 	if d.Notes != "" {
 		notes = &d.Notes
 	}
+	var constructorArgs *string
+	if d.ConstructorArgs != "" {
+		constructorArgs = &d.ConstructorArgs
+	}
 
 	row := p.pool.QueryRow(ctx, recordDeploymentSQL,
 		d.Alias, d.Network, d.ContractID, d.WasmHash, string(d.Action),
-		d.DeployerPubkey, txHash, ledger, notes)
+		d.DeployerPubkey, txHash, ledger, notes, constructorArgs)
 
 	out, err := scanDeployment(row)
 	if err != nil {
@@ -174,7 +178,7 @@ func (p *Postgres) RecordDeployment(ctx context.Context, d Deployment) (Deployme
 
 const historySQL = `
 SELECT id, alias, network, contract_id, wasm_hash, action,
-       deployer_pubkey, tx_hash, ledger, notes, created_at
+       deployer_pubkey, tx_hash, ledger, notes, constructor_args, created_at
 FROM deployments
 WHERE network = $1 AND alias = $2
 ORDER BY created_at DESC, id DESC`
@@ -219,14 +223,15 @@ func scanContract(s scanner) (Contract, error) {
 
 func scanDeployment(s scanner) (Deployment, error) {
 	var (
-		d      Deployment
-		action string
-		txHash *string
-		ledger *int64
-		notes  *string
+		d               Deployment
+		action          string
+		txHash          *string
+		ledger          *int64
+		notes           *string
+		constructorArgs *string
 	)
 	err := s.Scan(&d.ID, &d.Alias, &d.Network, &d.ContractID, &d.WasmHash, &action,
-		&d.DeployerPubkey, &txHash, &ledger, &notes, &d.CreatedAt)
+		&d.DeployerPubkey, &txHash, &ledger, &notes, &constructorArgs, &d.CreatedAt)
 	if err != nil {
 		return Deployment{}, err
 	}
@@ -240,6 +245,9 @@ func scanDeployment(s scanner) (Deployment, error) {
 	}
 	if notes != nil {
 		d.Notes = *notes
+	}
+	if constructorArgs != nil {
+		d.ConstructorArgs = *constructorArgs
 	}
 	return d, nil
 }

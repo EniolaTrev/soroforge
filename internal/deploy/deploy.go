@@ -5,6 +5,7 @@ import (
 	"errors"
 	"fmt"
 	"os"
+	"sort"
 
 	"github.com/soroworks/soroforge/internal/config"
 	"github.com/soroworks/soroforge/internal/stellar"
@@ -25,6 +26,12 @@ type DeployRequest struct {
 	// DryRun assembles and simulates the transactions but submits nothing and
 	// records nothing.
 	DryRun bool `json:"dry_run,omitempty"`
+
+	// ConstructorArgs overrides the contract's configured constructor_args
+	// for this one deploy. A non-nil slice — including an empty one — replaces
+	// the resolved config value entirely; nil keeps it. The CLI sets this from
+	// --arg or --args-file. It is deliberately absent from the HTTP API.
+	ConstructorArgs []config.Arg `json:"-"`
 }
 
 // DeployResult describes a completed or simulated deploy.
@@ -53,6 +60,10 @@ type DeployResult struct {
 
 	// UploadSkipped reports that the bytecode was already on-chain.
 	UploadSkipped bool `json:"upload_skipped,omitempty"`
+
+	// ConstructorArgs records the typed arguments this deploy actually used,
+	// after per-network overrides and any CLI replacement, as JSON.
+	ConstructorArgs string `json:"constructor_args,omitempty"`
 
 	// Deployment is the recorded history entry, absent on a dry run.
 	Deployment *store.Deployment `json:"deployment,omitempty"`
@@ -102,6 +113,27 @@ func (s *Service) Deploy(ctx context.Context, req DeployRequest) (*DeployResult,
 		DryRun:   req.DryRun,
 	}
 
+	// Resolve the constructor arguments up front: a bad argument should fail
+	// before either transaction is submitted, not after the bytecode upload
+	// has already paid for itself.
+	//
+	// The arguments resolved here are the ones actually used: the CLI
+	// replacement if there is one, otherwise the contract's constructor_args
+	// with this network's override already applied by resolve.
+	contractArgs := r.Contract.ConstructorArgs
+	if req.ConstructorArgs != nil {
+		contractArgs = req.ConstructorArgs
+	}
+	args, err := config.ArgsToScVals(contractArgs)
+	if err != nil {
+		return nil, fmt.Errorf("constructor args for %s: %w", r.Alias, err)
+	}
+	argsJSON, err := config.ArgsToJSON(contractArgs)
+	if err != nil {
+		return nil, err
+	}
+	result.ConstructorArgs = argsJSON
+
 	// Step 1: upload the bytecode, unless it is already on-chain. Uploading is
 	// content-addressed, so an identical upload is a no-op that still costs a
 	// transaction and a fee.
@@ -124,11 +156,6 @@ func (s *Service) Deploy(ctx context.Context, req DeployRequest) (*DeployResult,
 	}
 
 	// Step 2: instantiate a contract from the uploaded bytecode.
-	args, err := config.ArgsToScVals(r.Contract.ConstructorArgs)
-	if err != nil {
-		return nil, fmt.Errorf("constructor args for %s: %w", r.Alias, err)
-	}
-
 	salt, err := s.salt(r.Contract)
 	if err != nil {
 		return nil, err
@@ -165,15 +192,16 @@ func (s *Service) Deploy(ctx context.Context, req DeployRequest) (*DeployResult,
 
 	// Record only now, after the network has confirmed both transactions.
 	deployment, err := s.record(ctx, store.Deployment{
-		Alias:          r.Alias,
-		Network:        r.NetworkName,
-		ContractID:     contractID,
-		WasmHash:       wasmHashHex,
-		Action:         store.ActionDeploy,
-		DeployerPubkey: signer.Address(),
-		TxHash:         create.Hash,
-		Ledger:         create.Ledger,
-		Notes:          req.Notes,
+		Alias:           r.Alias,
+		Network:         r.NetworkName,
+		ContractID:      contractID,
+		WasmHash:        wasmHashHex,
+		Action:          store.ActionDeploy,
+		DeployerPubkey:  signer.Address(),
+		TxHash:          create.Hash,
+		Ledger:          create.Ledger,
+		Notes:           req.Notes,
+		ConstructorArgs: argsJSON,
 	})
 	if err != nil {
 		return nil, err
@@ -182,6 +210,113 @@ func (s *Service) Deploy(ctx context.Context, req DeployRequest) (*DeployResult,
 	result.Catalog = s.publish(ctx, r, contractID, log)
 
 	return result, nil
+}
+
+// DeployAllRequest asks for every contract in soroforge.yaml that is not yet
+// tracked on a network to be deployed in one run.
+type DeployAllRequest struct {
+	// Network names a network in soroforge.yaml. Empty uses default_network.
+	Network string `json:"network,omitempty"`
+
+	// Notes is free-form context recorded with every deployment in the run.
+	Notes string `json:"notes,omitempty"`
+
+	// DryRun assembles and simulates every deploy but submits and records
+	// nothing.
+	DryRun bool `json:"dry_run,omitempty"`
+}
+
+// Statuses reported for each contract in a DeployAll run.
+const (
+	// DeployAllDeployed means the contract was deployed and recorded.
+	DeployAllDeployed = "deployed"
+
+	// DeployAllDryRun means the deploy was simulated, nothing submitted.
+	DeployAllDryRun = "dry_run"
+
+	// DeployAllSkipped means the contract is already tracked on the network
+	// and was left alone.
+	DeployAllSkipped = "skipped"
+
+	// DeployAllFailed means the contract's deploy failed, stopping the run.
+	DeployAllFailed = "failed"
+)
+
+// DeployAllResult is one contract's outcome in a batch deploy.
+type DeployAllResult struct {
+	Alias string `json:"alias"`
+
+	// Status is one of DeployAllDeployed, DeployAllDryRun, DeployAllSkipped,
+	// or DeployAllFailed.
+	Status string `json:"status"`
+
+	// Result is the full deploy result for an attempted contract, the same
+	// shape a single deploy returns. Absent for a skipped or failed contract.
+	Result *DeployResult `json:"result,omitempty"`
+
+	// Error explains why a contract failed. A failure stops the run.
+	Error string `json:"error,omitempty"`
+}
+
+// DeployAll deploys every contract in the config that is not yet tracked on
+// the network, in alias order, and skips the ones that are already tracked.
+//
+// A tracked contract is skipped rather than redeployed: deploying it again
+// would create a second contract and silently move the alias to a new address.
+//
+// The first failure stops the run. The results gathered so far — including the
+// failure itself — are returned alongside the error, so callers can report
+// what succeeded before the run stopped.
+//
+// Contracts are processed in alias order, which does not resolve dependencies
+// between them (a constructor argument that needs another contract's address
+// cannot be discovered here); such projects need explicit ordering.
+func (s *Service) DeployAll(ctx context.Context, req DeployAllRequest) ([]DeployAllResult, error) {
+	name, _, err := s.cfg.Network(req.Network)
+	if err != nil {
+		return nil, err
+	}
+
+	aliases := make([]string, 0, len(s.cfg.Contracts))
+	for alias := range s.cfg.Contracts {
+		aliases = append(aliases, alias)
+	}
+	sort.Strings(aliases)
+
+	results := make([]DeployAllResult, 0, len(aliases))
+	for _, alias := range aliases {
+		_, err := s.store.GetContract(ctx, name, alias)
+		switch {
+		case err == nil:
+			s.log.Info("contract is already tracked, skipping", "alias", alias, "network", name)
+			results = append(results, DeployAllResult{Alias: alias, Status: DeployAllSkipped})
+			continue
+		case !errors.Is(err, store.ErrNotFound):
+			return results, fmt.Errorf("check whether %s is tracked on %s: %w", alias, name, err)
+		}
+
+		result, err := s.Deploy(ctx, DeployRequest{
+			Alias:   alias,
+			Network: name,
+			Notes:   req.Notes,
+			DryRun:  req.DryRun,
+		})
+		if err != nil {
+			results = append(results, DeployAllResult{
+				Alias:  alias,
+				Status: DeployAllFailed,
+				Error:  err.Error(),
+			})
+			return results, fmt.Errorf("deploy %s on %s: %w", alias, name, err)
+		}
+
+		status := DeployAllDeployed
+		if result.DryRun {
+			status = DeployAllDryRun
+		}
+		results = append(results, DeployAllResult{Alias: alias, Status: status, Result: result})
+	}
+	return results, nil
 }
 
 // record writes a history entry and updates the contract's current state.

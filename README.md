@@ -99,6 +99,13 @@ doesn't expose one **cannot be upgraded**, and SoroForge will report the
 contract's own error. The entrypoint name defaults to `upgrade` and is
 configurable per contract via `upgrade_fn`.
 
+A confirmed transaction is not proof the code changed: an upgrade entrypoint
+could accept the call and do something else. So after the transaction confirms,
+SoroForge reads the contract's on-chain WASM hash back — retrying briefly while
+the ledger closes — and only then reports success and records the upgrade. If
+the contract still runs something else, the upgrade fails with both hashes and
+nothing is recorded.
+
 ---
 
 ## Quickstart — deploy to testnet
@@ -196,6 +203,11 @@ contracts:
     constructor_args: []    # optional
     upgrade_fn: upgrade     # optional, defaults to "upgrade"
     salt: ""                # optional 32-byte hex
+    networks:               # optional per-network overrides
+      mainnet:
+        constructor_args:
+          - {type: address, value: GABC...}
+        salt: "00112233445566778899aabbccddeeff00112233445566778899aabbccddeeff"
 ```
 
 **Networks.** Any number, named freely. The passphrase is required rather than
@@ -222,6 +234,16 @@ shell's working directory, so `soroforge deploy` behaves the same from anywhere.
 **`salt`** makes a contract's address reproducible: addresses derive from
 (deployer address, salt). Leave it unset and each deploy uses a random salt, so
 deploying the same alias twice produces two distinct contracts.
+
+**`networks`** overrides `constructor_args` and `salt` for one network: the
+per-network value wins when that network is deployed to, and the contract-level
+value is the default everywhere else (`wasm` and `upgrade_fn` are not
+overridable). An explicit `constructor_args: []` in an override means "no
+arguments on this network" — an empty list clears the contract default rather
+than inheriting it — while an empty `salt` inherits the contract's. Both names
+must match a network configured under `networks:`; an unknown one is a load
+error reported with its full path, e.g.
+`contracts.token.networks.mainnet.salt: unknown network (configured: testnet)`.
 
 ### Constructor arguments
 
@@ -260,6 +282,36 @@ Adding a type means one case in
 [`internal/config/args.go`](internal/config/args.go) and one table entry in its
 test.
 
+#### Overriding arguments for one deploy
+
+`deploy` can replace the configured arguments for a single run:
+
+```bash
+soroforge deploy counter --arg u32:7 --arg string:"Example Token"
+soroforge deploy counter --args-file args.json
+```
+
+`--arg TYPE:VALUE` is repeatable and accepts the same types as the config file.
+Only the first colon separates the type from the value, so a value may contain
+one (`string:https://example.org`). `--args-file` points at a JSON array in the
+same `{type, value}` shape — the only form that can express nested `vec` and
+`map` arguments:
+
+```json
+[
+  {"type": "u32", "value": 7},
+  {"type": "vec", "value": [{"type": "symbol", "value": "a"}]}
+]
+```
+
+The two flags are mutually exclusive, and the replacement applies to that one
+deploy only: nothing in `soroforge.yaml` changes, and nothing is submitted
+until the arguments validate. The typed arguments actually used — after
+per-network overrides and any replacement — are recorded with the deployment
+in the `constructor_args` column and shown by `history`, so a deploy can be
+reproduced after the config has moved on. Neither flag works with `--all`,
+which deploys each contract with its configured arguments.
+
 ### Environment variables
 
 | Variable | Purpose |
@@ -283,7 +335,8 @@ Output goes to stdout and logs to stderr, so `--json` output stays pipeable.
 | Command | Description |
 |---|---|
 | `init` | Write a starter `soroforge.yaml` for the contracts built under `target/`. |
-| `deploy <alias>` | Upload WASM, instantiate the contract, record it. |
+| `deploy <alias>` | Upload WASM, instantiate the contract, record it. `--arg`/`--args-file` override `constructor_args` for this run. |
+| `deploy --all` | Deploy every configured contract not yet tracked on the network, in alias order. |
 | `upgrade <alias>` | Upload new WASM and invoke the contract's upgrade entrypoint. |
 | `list` | List tracked contracts; `--network` filters. |
 | `history <alias>` | Show a contract's full deploy/upgrade timeline, newest first. |
@@ -298,6 +351,17 @@ Output goes to stdout and logs to stderr, so `--json` output stays pipeable.
 **`--dry-run`** runs everything up to and including simulation and assembly,
 then stops. It prints the assembled envelopes and the resulting contract
 address, and writes nothing and submits nothing. It's safe to point at mainnet.
+
+**`deploy --all`** fills in every contract the network doesn't have yet:
+already-tracked aliases are skipped with a message, the rest are deployed in
+alias order. The first failure stops the run, and the summary reports what
+succeeded before it, so a partial run is never a mystery. `--dry-run` works
+with `--all`, and `--json` returns an array of per-alias results whose `status`
+is one of `deployed`, `dry_run`, `skipped`, or `failed`.
+
+Contracts are processed in alias order, and SoroForge does not infer
+dependencies between them: if one contract's constructor needs another
+contract's address, deploy them individually in the order you need.
 
 **`status` exit codes** make it usable as a CI gate:
 
@@ -420,8 +484,10 @@ function, tested directly.
 
 `contracts` holds current state, one row per contract per network, unique on
 `(network, alias)`. `deployments` is append-only: an upgrade adds a row rather
-than modifying one, so the rows for a contract *are* its version history. Both
-are indexed on `(network, contract_id)`.
+than modifying one, so the rows for a contract *are* its version history. The
+typed constructor arguments a deploy used are stored per row in
+`deployments.constructor_args` as JSON, next to the free-form `notes`. Both are
+indexed on `(network, contract_id)`.
 
 Records are written **only after on-chain confirmation**. A history claiming a
 deploy that never landed is worse than no history.

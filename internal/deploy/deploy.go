@@ -113,46 +113,16 @@ func (s *Service) Deploy(ctx context.Context, req DeployRequest) (*DeployResult,
 		DryRun:   req.DryRun,
 	}
 
-	// Resolve the constructor arguments up front: a bad argument should fail
-	// before either transaction is submitted, not after the bytecode upload
-	// has already paid for itself.
-	//
-	// The arguments resolved here are the ones actually used: the CLI
-	// replacement if there is one, otherwise the contract's constructor_args
-	// with this network's override already applied by resolve.
-	contractArgs := r.Contract.ConstructorArgs
-	if req.ConstructorArgs != nil {
-		contractArgs = req.ConstructorArgs
-	}
-	args, err := config.ArgsToScVals(contractArgs)
-	if err != nil {
-		return nil, fmt.Errorf("constructor args for %s: %w", r.Alias, err)
-	}
-	argsJSON, err := config.ArgsToJSON(contractArgs)
+	// Step 1: upload the bytecode, unless it is already on-chain.
+	upload, skipped, err := s.uploadBytecode(ctx, r, signer, wasm, req.DryRun, log)
 	if err != nil {
 		return nil, err
 	}
-	result.ConstructorArgs = argsJSON
-
-	// Step 1: upload the bytecode, unless it is already on-chain. Uploading is
-	// content-addressed, so an identical upload is a no-op that still costs a
-	// transaction and a fee.
-	uploaded, err := stellar.WasmUploaded(ctx, r.Client, wasmHash)
-	if err != nil {
-		return nil, fmt.Errorf("check whether wasm is already uploaded: %w", err)
-	}
-	if uploaded {
-		log.Info("wasm already on-chain, skipping upload")
+	if skipped {
 		result.UploadSkipped = true
 	} else {
-		upload, err := s.runTransaction(ctx, r,
-			stellar.UploadWasmOp(wasm, signer.Address()), req.DryRun)
-		if err != nil {
-			return nil, fmt.Errorf("upload wasm: %w", err)
-		}
 		result.UploadTxHash = upload.Hash
 		result.UploadEnvelopeXDR = upload.EnvelopeXDR
-		log.Info("wasm uploaded", "tx_hash", upload.Hash)
 	}
 
 	// Step 2: instantiate a contract from the uploaded bytecode.

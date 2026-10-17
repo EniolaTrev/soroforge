@@ -39,12 +39,15 @@ const (
 	// a proposal and a separate party later calls the contract's upgrade
 	// function. No contract exists yet, so the record has no contract id.
 	ActionUpload Action = "upload"
+
+	// ActionInvoke is an administrative function call against a deployed contract.
+	ActionInvoke Action = "invoke"
 )
 
 // Valid reports whether a is a recognised action. The database enforces this
 // too; checking here produces a better error than a constraint violation.
 func (a Action) Valid() bool {
-	return a == ActionDeploy || a == ActionUpgrade || a == ActionUpload
+	return a == ActionDeploy || a == ActionUpgrade || a == ActionUpload || a == ActionInvoke
 }
 
 func (a Action) String() string { return string(a) }
@@ -82,6 +85,18 @@ type Deployment struct {
 	TxHash string `json:"tx_hash,omitempty"`
 	Ledger uint32 `json:"ledger,omitempty"`
 
+	// GitCommit is the git commit hash the deploy/upgrade was recorded from.
+	// Empty string when run outside a git repository or when detection fails.
+	GitCommit string `json:"git_commit"`
+
+	// Dirty reports whether the working tree had uncommitted changes at the time
+	// of the deploy/upgrade. Set to true when inside a git repo with modifications.
+	Dirty bool `json:"dirty"`
+
+	// FeeCharged is the fee paid for the transaction, in stroops.
+	// Nullable: absent for a dry run, or if the fee cannot be determined.
+	FeeCharged *int64 `json:"fee_charged,omitempty"`
+
 	// Notes is free-form operator context, e.g. a ticket or release tag.
 	Notes string `json:"notes,omitempty"`
 
@@ -89,6 +104,17 @@ type Deployment struct {
 	// as JSON in the same shape as soroforge.yaml. Empty for upgrades, which
 	// take none, and for deploys with no arguments.
 	ConstructorArgs string `json:"constructor_args,omitempty"`
+
+	// CIRunURL is the CI pipeline run URL when deployed from GitHub Actions or
+	// GitLab CI. Outside CI this is empty. It answers "which commit and merge
+	// triggered this deploy" for audit purposes.
+	CIRunURL string `json:"ci_run_url,omitempty"`
+
+	// FnName is the function invoked on the contract, when action is ActionInvoke.
+	FnName string `json:"fn_name,omitempty"`
+
+	// FnArgs is the string representation of invocation arguments, when action is ActionInvoke.
+	FnArgs string `json:"fn_args,omitempty"`
 
 	CreatedAt time.Time `json:"created_at"`
 }
@@ -111,14 +137,30 @@ type Store interface {
 	// contracts across all networks.
 	ListContracts(ctx context.Context, network string) ([]Contract, error)
 
+	// ListContractsPage returns one page using the same network/alias ordering.
+	ListContractsPage(ctx context.Context, network string, limit, offset int) ([]Contract, error)
+
 	// RecordDeployment appends a history entry.
 	RecordDeployment(ctx context.Context, d Deployment) (Deployment, error)
 
 	// History returns a contract's deployments, newest first.
 	History(ctx context.Context, network, alias string) ([]Deployment, error)
 
+	// HistoryPage returns one newest-first page of a contract's deployment log.
+	HistoryPage(ctx context.Context, network, alias string, limit, offset int) ([]Deployment, error)
+
 	// Close releases resources held by the store.
 	Close() error
+}
+
+func validatePage(limit, offset int) error {
+	if limit < 1 {
+		return fmt.Errorf("page limit must be positive")
+	}
+	if offset < 0 {
+		return fmt.Errorf("page offset must be non-negative")
+	}
+	return nil
 }
 
 // Validate checks a deployment record before it is written, so that bad data is
@@ -136,8 +178,8 @@ func (d Deployment) Validate() error {
 	case d.WasmHash == "":
 		return fmt.Errorf("deployment: wasm_hash is required")
 	case !d.Action.Valid():
-		return fmt.Errorf("deployment: action must be %q, %q, or %q, got %q",
-			ActionDeploy, ActionUpgrade, ActionUpload, d.Action)
+		return fmt.Errorf("deployment: action must be %q, %q, %q, or %q, got %q",
+			ActionDeploy, ActionUpgrade, ActionUpload, ActionInvoke, d.Action)
 	case d.DeployerPubkey == "":
 		return fmt.Errorf("deployment: deployer_pubkey is required")
 	}

@@ -313,6 +313,25 @@ in the `constructor_args` column and shown by `history`, so a deploy can be
 reproduced after the config has moved on. Neither flag works with `--all`,
 which deploys each contract with its configured arguments.
 
+### Initializers (contracts without constructors)
+
+Contracts written before constructors existed on Soroban are initialized by an explicit function call (such as `initialize`) after deployment. SoroForge supports this via `init_fn` and `init_args`:
+
+```yaml
+contracts:
+  counter:
+    wasm: ./counter.wasm
+    init_fn: initialize
+    init_args:
+      - {type: address, value: GABC...}
+      - {type: u32, value: 1}
+```
+
+> [!WARNING]
+> **Front-running risk:** An initializer is submitted as a separate transaction immediately after the contract is created. Between contract creation and initializer confirmation, there is a window where another party could attempt to front-run the initializer call and claim ownership.
+>
+> **Recommendation:** For all new Soroban smart contracts, use **constructors** (`constructor_args`) instead of initializers. Constructors execute atomically during contract creation, eliminating the front-running window entirely. Use `init_fn` only when deploying legacy contracts that do not support constructors. Note that `constructor_args` and `init_fn` are mutually exclusive.
+
 ### Environment variables
 
 | Variable | Purpose |
@@ -364,7 +383,11 @@ falling back.
 | `migrate up\|down\|version` | Manage the schema. |
 | `version` | Print the SoroForge version. |
 
-`deploy`, `upgrade`, and `upload` accept `--dry-run` and `--notes`.
+`deploy`, `upgrade`, and `upload` accept `--dry-run` and `--notes`. Deploy and
+upgrade also accept `--git-commit` to record a source revision supplied by CI
+instead of detecting the current checkout. History displays confirmed
+transaction fees in stroops and XLM, plus the short source commit (`*` marks a
+dirty working tree).
 
 **`--dry-run`** runs everything up to and including simulation and assembly,
 then stops. It prints the assembled envelopes and the resulting contract
@@ -439,16 +462,20 @@ unknown token is **401 Unauthorized**.
 |---|---|---|---|
 | `GET` | `/health` | public | Liveness. Process up; dependencies not checked. |
 | `GET` | `/ready` | public | Readiness. `200` when the database answers and each configured network's RPC returns a latest ledger; `503` with the failing dependency names otherwise. Checks are cached briefly so probes cannot hammer the RPC. |
-| `POST` | `/v1/deploy` | write | `{"alias","network","notes","dry_run"}` → `201` (`200` for a dry run). |
+| `GET` | `/openapi.json` | public | OpenAPI 3.1 API description. |
+| `POST` | `/v1/deploy` | write | `{"alias","network","notes","dry_run","git_commit"}` → `201` (`200` for a dry run). |
 | `POST` | `/v1/upgrade` | write | Same body → `200`. |
-| `GET` | `/v1/contracts?network=` | read | Tracked contracts. |
-| `GET` | `/v1/contracts/{network}/{alias}/history` | read | Deployment history. |
+| `GET` | `/v1/contracts?network=&limit=&offset=` | read | Tracked contracts, paginated (default limit 100, maximum 500). |
+| `GET` | `/v1/contracts/{network}/{alias}/history?limit=&offset=` | read | Deployment history, paginated (default limit 100, maximum 500). |
 | `GET` | `/v1/contracts/{network}/{alias}/status` | read | Drift check. |
 | `GET` | `/v1/contracts/{network}/status` | read | Drift check of every tracked contract; `in_sync` is the verdict. |
 
 Every route's scope is declared in one table in
 [`internal/api/api.go`](internal/api/api.go), and a test walks the built router
 to fail if a route is ever added without one.
+
+The complete request and response schemas are served as OpenAPI 3.1 at
+`GET /openapi.json`, which is public and needs no bearer token.
 
 ```bash
 curl -X POST http://localhost:8080/v1/deploy \

@@ -70,6 +70,13 @@ type harnessOptions struct {
 	// (a skipped contract, for example) capture them here instead of
 	// discarding them.
 	log io.Writer
+
+	// webhooks replaces the webhook sender.
+	webhooks deploy.WebhookSender
+
+	// logOut captures the service log instead of discarding it, for tests
+	// that assert on what is logged.
+	logOut io.Writer
 }
 
 func newHarness(t *testing.T, opts harnessOptions) *harness {
@@ -125,18 +132,18 @@ contracts:
 	// Discard logs so test output stays readable, unless the test wants them.
 	logWriter := opts.log
 	if logWriter == nil {
-		logWriter = io.Discard
+		logWriter = orIoDiscard(opts.logOut)
 	}
 
 	svc, err := deploy.New(deploy.Options{
-		Config:  cfg,
-		Store:   memStore,
-		Signer:  signer,
-		Clients: func(string, config.Network) (stellar.Client, error) { return client, nil },
-		Log:     slog.New(slog.NewTextHandler(logWriter, nil)),
-
+		Config:      cfg,
+		Store:       memStore,
+		Signer:      signer,
+		Clients:     func(string, config.Network) (stellar.Client, error) { return client, nil },
+		Log:         slog.New(slog.NewTextHandler(logWriter, nil)),
 		Catalog:     opts.catalog,
 		VerifyDelay: opts.verifyDelay,
+		Webhooks:    opts.webhooks,
 	})
 	require.NoError(t, err)
 
@@ -194,6 +201,14 @@ func installUpgradeEffect(t *testing.T, client *stellar.MockClient) {
 			require.NoError(t, client.SetContractInstance(contractID, hash))
 		}
 	}
+}
+
+// orIoDiscard keeps the harness log silent unless a test provides a writer.
+func orIoDiscard(w io.Writer) io.Writer {
+	if w != nil {
+		return w
+	}
+	return io.Discard
 }
 
 // simulationReturning builds a simulation response whose return value is the

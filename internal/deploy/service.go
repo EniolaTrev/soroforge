@@ -64,6 +64,9 @@ type Service struct {
 	verifyAttempts int
 	verifyDelay    time.Duration
 
+	// maxContractSize is the largest contract WASM that will be uploaded.
+	maxContractSize int
+
 	// catalog publishes confirmed contracts to a network's sorovault_url.
 	catalog catalog.Registrar
 
@@ -101,6 +104,11 @@ type Options struct {
 	// VerifyDelay is the wait between those re-reads. Defaults to
 	// DefaultVerifyDelay; tests set it low.
 	VerifyDelay time.Duration
+
+	// MaxContractSize is the largest contract WASM SoroForge will upload, in
+	// bytes. Defaults to stellar.DefaultMaxContractSize; a non-positive value
+	// also selects the default, since refusing every upload is never intended.
+	MaxContractSize int
 
 	// Catalog registers confirmed deploys and upgrades with the network's
 	// sorovault_url, when one is configured. Defaults to a SoroVault HTTP
@@ -169,23 +177,29 @@ func New(opts Options) (*Service, error) {
 	if registrar == nil {
 		registrar = catalog.NewSoroVault(nil)
 	}
+	maxContractSize := opts.MaxContractSize
+	if maxContractSize <= 0 {
+		maxContractSize = stellar.DefaultMaxContractSize
+	}
+
 	webhooks := opts.Webhooks
 	if webhooks == nil {
 		webhooks = NewHTTPWebhookSender(nil)
 	}
 
 	return &Service{
-		cfg:            opts.Config,
-		store:          opts.Store,
-		signer:         opts.Signer,
-		clients:        clients,
-		log:            log,
-		baseFee:        baseFee,
-		confirmTimeout: confirmTimeout,
-		verifyAttempts: verifyAttempts,
-		verifyDelay:    verifyDelay,
-		catalog:        registrar,
-		webhooks:       webhooks,
+		cfg:             opts.Config,
+		store:           opts.Store,
+		signer:          opts.Signer,
+		clients:         clients,
+		log:             log,
+		baseFee:         baseFee,
+		confirmTimeout:  confirmTimeout,
+		verifyAttempts:  verifyAttempts,
+		verifyDelay:     verifyDelay,
+		catalog:         registrar,
+		webhooks:        webhooks,
+		maxContractSize: maxContractSize,
 	}, nil
 }
 
@@ -294,8 +308,8 @@ type resolved struct {
 func (s *Service) requireSigner() (stellar.Signer, error) {
 	if s.signer == nil {
 		return nil, fmt.Errorf(
-			"no signing key configured: set %s or %s (see README security notes)",
-			config.EnvSecretKey, config.EnvKeystorePath)
+			"no signing key configured: set %s or %s, or %s with %s (see README security notes)",
+			config.EnvSecretKey, config.EnvKeystorePath, config.EnvSignerCommand, config.EnvSignerPublicKey)
 	}
 	return s.signer, nil
 }

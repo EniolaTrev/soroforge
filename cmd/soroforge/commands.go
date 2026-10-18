@@ -26,12 +26,13 @@ var version = "dev"
 
 func newDeployCmd() *cobra.Command {
 	var (
-		dryRun    bool
-		notes     string
-		gitCommit string
-		all       bool
-		argFlags  []string
-		argsFile  string
+		dryRun      bool
+		notes       string
+		gitCommit   string
+		requireSpec bool
+		all         bool
+		argFlags    []string
+		argsFile    string
 	)
 
 	cmd := &cobra.Command{
@@ -42,6 +43,14 @@ func newDeployCmd() *cobra.Command {
 This is two transactions: the bytecode is uploaded and becomes addressable by
 its hash, then a contract instance is created from that hash. Both must confirm
 before anything is recorded.
+
+Use --dry-run to assemble and simulate the transactions without submitting
+them. A dry run prints the contract address a real deploy would produce and the
+assembled envelopes, and writes nothing to the database.
+
+A WASM without a contractspecv0 section still deploys, but warns that SoroVault
+cannot catalogue it and clients cannot be generated for it. --require-spec turns
+that warning into an error.
 
 Constructor arguments come from soroforge.yaml unless overridden here for one
 deploy: --arg TYPE:VALUE (repeatable) replaces them, or --args-file points at
@@ -88,11 +97,12 @@ it. --dry-run works with --all.`,
 			}
 
 			request := deploy.DeployRequest{
-				Alias:     args[0],
-				Network:   flags.network,
-				Notes:     notes,
-				DryRun:    dryRun,
-				GitCommit: gitCommit,
+				Alias:       args[0],
+				Network:     flags.network,
+				Notes:       notes,
+				DryRun:      dryRun,
+				GitCommit:   gitCommit,
+				RequireSpec: requireSpec,
 			}
 
 			switch {
@@ -136,16 +146,19 @@ it. --dry-run works with --all.`,
 		"JSON file with an array of {type, value} constructor arguments; replaces the config's")
 	attachAliasCompletion(cmd)
 	cmd.Flags().StringVar(&gitCommit, "git-commit", "", "override the detected source commit")
+	cmd.Flags().BoolVar(&requireSpec, "require-spec", false,
+		"fail instead of warning when the WASM exports no contractspecv0 section")
 
 	return cmd
 }
 
 func newUpgradeCmd() *cobra.Command {
 	var (
-		dryRun    bool
-		notes     string
-		gitCommit string
-		wasmHash  string
+		dryRun      bool
+		notes       string
+		gitCommit   string
+		wasmHash    string
+		requireSpec bool
 	)
 
 	cmd := &cobra.Command{
@@ -160,7 +173,11 @@ contract's own upgrade entrypoint — "upgrade" by default, or whatever
 function, or that rejects the caller, will fail here with its own error.
 
 The current hash is read from the ledger rather than the database, so an
-upgrade applied outside SoroForge is still reported accurately.`,
+upgrade applied outside SoroForge is still reported accurately.
+
+A WASM without a contractspecv0 section still upgrades, but warns that SoroVault
+cannot catalogue the new interface and clients cannot be generated for it.
+--require-spec turns that warning into an error.`,
 		Args: cobra.ExactArgs(1),
 		RunE: func(cmd *cobra.Command, args []string) error {
 			a, err := newApp(cmd.Context(), appOptions{requireSigner: true})
@@ -170,12 +187,13 @@ upgrade applied outside SoroForge is still reported accurately.`,
 			defer a.Close()
 
 			result, err := a.service.Upgrade(cmd.Context(), deploy.UpgradeRequest{
-				Alias:     args[0],
-				Network:   flags.network,
-				Notes:     notes,
-				DryRun:    dryRun,
-				GitCommit: gitCommit,
-				WasmHash:  wasmHash,
+				Alias:       args[0],
+				Network:     flags.network,
+				Notes:       notes,
+				DryRun:      dryRun,
+				GitCommit:   gitCommit,
+				WasmHash:    wasmHash,
+				RequireSpec: requireSpec,
 			})
 			if err != nil {
 				return err
@@ -191,6 +209,8 @@ upgrade applied outside SoroForge is still reported accurately.`,
 	attachAliasCompletion(cmd)
 	cmd.Flags().StringVar(&gitCommit, "git-commit", "", "override the detected source commit")
 	cmd.Flags().StringVar(&wasmHash, "wasm-hash", "", "upgrade to an existing on-chain WASM hash instead of local file")
+	cmd.Flags().BoolVar(&requireSpec, "require-spec", false,
+		"fail instead of warning when the WASM exports no contractspecv0 section")
 
 	return cmd
 }
@@ -621,8 +641,9 @@ authentication and TLS in front of it.
 Endpoints:
   GET  /health   liveness, no auth
   GET  /ready    readiness (database and each network's RPC), no auth
-  POST /v1/deploy
-  POST /v1/upgrade
+  POST /v1/deploy            (?async=true for a job)
+  POST /v1/upgrade           (?async=true for a job)
+  GET  /v1/jobs/{id}
   GET  /v1/contracts?network=<name>
   GET  /v1/contracts/{network}/{alias}/history
   GET  /v1/contracts/{network}/{alias}/status

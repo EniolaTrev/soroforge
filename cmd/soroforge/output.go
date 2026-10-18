@@ -58,6 +58,7 @@ func printDeployResult(r *deploy.DeployResult) error {
 	if r.ConstructorArgs != "" {
 		fmt.Fprintf(w, "  Constructor   %s\n", r.ConstructorArgs)
 	}
+	printWarnings(w, r.Warnings)
 
 	if r.UploadSkipped {
 		fmt.Fprintf(w, "  Upload        skipped (this bytecode is already on-chain)\n")
@@ -122,6 +123,7 @@ func printUpgradeResult(r *deploy.UpgradeResult) error {
 	fmt.Fprintf(w, "  To            %s\n", r.WasmHash)
 	fmt.Fprintf(w, "  Entrypoint    %s\n", r.UpgradeFunc)
 	fmt.Fprintf(w, "  Deployer      %s\n", r.Deployer)
+	printWarnings(w, r.Warnings)
 
 	if r.UploadSkipped {
 		fmt.Fprintf(w, "  Upload        skipped (this bytecode is already on-chain)\n")
@@ -228,6 +230,15 @@ func printInvokeResult(r *deploy.InvokeResult) error {
 	}
 
 	return nil
+}
+
+// printWarnings reports non-fatal artifact problems found before upload. They
+// go to stdout with the result because they are part of it; --json carries the
+// same text in the result's warnings field.
+func printWarnings(w io.Writer, warnings []string) {
+	for _, warning := range warnings {
+		fmt.Fprintf(w, "  Warning       %s\n", warning)
+	}
 }
 
 // printCatalog reports SoroVault registration. A failure is shown as a

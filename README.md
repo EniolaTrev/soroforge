@@ -422,6 +422,9 @@ of an error printed mid-prompt.
 | Command | Description |
 |---|---|
 | `init` | Write a starter `soroforge.yaml` for the contracts built under `target/`. |
+| `config check` | Check config and WASM files; `--offline` skips RPC checks. |
+| `deploy <alias>` | Upload WASM, instantiate the contract, record it. `--arg`/`--args-file` override `constructor_args` for this run. |
+| `deploy --all` | Deploy every configured contract not yet tracked on the network, in alias order. |
 | `upgrade <alias>` | Upload new WASM and invoke the contract's upgrade entrypoint. |
 | `upload <alias>` | Install WASM on-chain without deploying or upgrading; prints the hash for a governance proposal. |
 | `list` | List tracked contracts; `--network` filters. |

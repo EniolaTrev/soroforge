@@ -74,6 +74,9 @@ type harnessOptions struct {
 	// discarding them.
 	log io.Writer
 
+	// progress receives deploy progress events, when set.
+	progress deploy.ProgressFunc
+
 	// webhooks replaces the webhook sender.
 	webhooks deploy.WebhookSender
 
@@ -147,6 +150,7 @@ contracts:
 		Log:             slog.New(slog.NewTextHandler(logWriter, nil)),
 		Catalog:         opts.catalog,
 		VerifyDelay:     opts.verifyDelay,
+		Progress:        opts.progress,
 		Webhooks:        opts.webhooks,
 	})
 	require.NoError(t, err)

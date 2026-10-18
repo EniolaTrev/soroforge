@@ -33,6 +33,7 @@ func newDeployCmd() *cobra.Command {
 		all         bool
 		argFlags    []string
 		argsFile    string
+		progress    bool
 	)
 
 	cmd := &cobra.Command{
@@ -45,8 +46,9 @@ its hash, then a contract instance is created from that hash. Both must confirm
 before anything is recorded.
 
 Use --dry-run to assemble and simulate the transactions without submitting
-them. A dry run prints the contract address a real deploy would produce and the
-assembled envelopes, and writes nothing to the database.
+them. A dry run prints the contract address a real deploy would produce, the
+estimated fees, and the assembled envelopes, and writes nothing to the
+database.
 
 A WASM without a contractspecv0 section still deploys, but warns that SoroVault
 cannot catalogue it and clients cannot be generated for it. --require-spec turns
@@ -59,7 +61,11 @@ a JSON array of the same typed arguments. The two are mutually exclusive.
 With --all, every contract in soroforge.yaml that is not yet tracked on the
 network is deployed, in alias order; already-tracked contracts are skipped.
 The first failure stops the run and the summary reports what was done before
-it. --dry-run works with --all.`,
+it. --dry-run works with --all.
+
+Progress is written to stderr while waiting for confirmation, and only when
+stderr is a terminal, so stdout and --json stay clean. Use --progress to force
+it on in a pipe or log.`,
 		Args: func(cmd *cobra.Command, args []string) error {
 			if all {
 				return cobra.NoArgs(cmd, args)
@@ -72,6 +78,7 @@ it. --dry-run works with --all.`,
 			a, err := newApp(cmd.Context(), appOptions{
 				requireSigner: true,
 				storeOptional: dryRun,
+				progress:      progressFor(progress),
 			})
 			if err != nil {
 				return err
@@ -144,6 +151,8 @@ it. --dry-run works with --all.`,
 		"constructor argument as TYPE:VALUE (repeatable); replaces the config's constructor_args")
 	cmd.Flags().StringVar(&argsFile, "args-file", "",
 		"JSON file with an array of {type, value} constructor arguments; replaces the config's")
+	cmd.Flags().BoolVar(&progress, "progress", false,
+		"show progress on stderr even when stderr is not a terminal")
 	attachAliasCompletion(cmd)
 	cmd.Flags().StringVar(&gitCommit, "git-commit", "", "override the detected source commit")
 	cmd.Flags().BoolVar(&requireSpec, "require-spec", false,
@@ -159,6 +168,7 @@ func newUpgradeCmd() *cobra.Command {
 		gitCommit   string
 		wasmHash    string
 		requireSpec bool
+		progress    bool
 	)
 
 	cmd := &cobra.Command{
@@ -177,10 +187,17 @@ upgrade applied outside SoroForge is still reported accurately.
 
 A WASM without a contractspecv0 section still upgrades, but warns that SoroVault
 cannot catalogue the new interface and clients cannot be generated for it.
---require-spec turns that warning into an error.`,
+--require-spec turns that warning into an error.
+
+Progress is written to stderr while waiting for confirmation, and only when
+stderr is a terminal, so stdout and --json stay clean. Use --progress to force
+it on in a pipe or log.`,
 		Args: cobra.ExactArgs(1),
 		RunE: func(cmd *cobra.Command, args []string) error {
-			a, err := newApp(cmd.Context(), appOptions{requireSigner: true})
+			a, err := newApp(cmd.Context(), appOptions{
+				requireSigner: true,
+				progress:      progressFor(progress),
+			})
 			if err != nil {
 				return err
 			}
@@ -206,6 +223,8 @@ cannot catalogue the new interface and clients cannot be generated for it.
 		"assemble and simulate without submitting or recording anything")
 	cmd.Flags().StringVar(&notes, "notes", "",
 		"free-form note recorded with this upgrade")
+	cmd.Flags().BoolVar(&progress, "progress", false,
+		"show progress on stderr even when stderr is not a terminal")
 	attachAliasCompletion(cmd)
 	cmd.Flags().StringVar(&gitCommit, "git-commit", "", "override the detected source commit")
 	cmd.Flags().StringVar(&wasmHash, "wasm-hash", "", "upgrade to an existing on-chain WASM hash instead of local file")
